@@ -402,14 +402,16 @@ def build_text_dataloader(
             timeout=cfg.get("timeout", 0),
             sampler=sampler,
         )
+        pad_token_id = cfg.get("pad_token_id", tokenizer.pad_token_id)
+        mask_token_id = cfg.get("mask_token_id", tokenizer.mask_token_id)
         sequence_packer = GreedyBestFitSequencePacker.from_composer(
             dataloader,
             batch_size=device_batch_size,
             micro_batch_size=device_microbatch_size,
             max_seq_len=cfg.dataset.max_seq_len,
             buffer_size=cfg.get("packing_buffer_size", 5 * device_batch_size),
-            mask_token_id=tokenizer.mask_token_id,
-            pad_token_id=tokenizer.pad_token_id,
+            mask_token_id=mask_token_id,
+            pad_token_id=pad_token_id,
             mask_prob=mlm_probability,
             seed=cfg.dataset.get("shuffle_seed", 42),
             batch_size_warmup_min_size=cfg.get("batch_size_warmup_min_size", None),

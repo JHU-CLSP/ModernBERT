@@ -1,4 +1,4 @@
-name: bert24
+name: modernbert
 channels:
   - pytorch
   - huggingface

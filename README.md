@@ -22,7 +22,7 @@ We have fully documented the environment used to train ModernBERT, which can be 
 conda env create -f environment.yaml
 # if the conda environment errors out set channel priority to flexible:
 # conda config --set channel_priority flexible
-conda activate bert24
+conda activate modernbert
 # if using H100s clone and build flash attention 3
 # git clone https://github.com/Dao-AILab/flash-attention.git
 # cd flash-attention/hopper

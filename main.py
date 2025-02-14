@@ -44,6 +44,7 @@ from src.callbacks.dataloader_speed import DataloaderSpeedMonitor
 from src.callbacks.log_grad_norm import LogGradNorm
 from src.callbacks.packing_efficiency import PackingEfficency
 from src.callbacks.scheduled_gc import ScheduledGarbageCollector
+from src.callbacks.hf_sync import HuggingFaceSync
 from src.scheduler import CosineInverseSqrtScheduler, OneMinusSqrtScheduler, WarmupStableDecayScheduler
 from src.sequence_packer import get_num_samples_in_packed_batch, split_packed_batch
 
@@ -165,6 +166,13 @@ def build_callback(name, kwargs):
         )
     elif name == "scheduled_gc":
         return ScheduledGarbageCollector(batch_interval=kwargs.get("batch_interval", 100_000))
+    elif name == "hf_sync":
+        return HuggingFaceSync(
+            repo_id=kwargs.get("hf_repo"),
+            model_save_folder=kwargs.get("save_folder"),
+            token=kwargs.get("hf_token"),
+            repo_can_exist=kwargs.get("repo_can_exist", False),
+        )
     elif name == "log_grad_norm":
         return LogGradNorm(
             log_optimizer_metrics=kwargs.get("log_optimizer_metrics", True),
