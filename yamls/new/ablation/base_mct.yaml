@@ -32,6 +32,7 @@ parameters:
     bs_warmup: 50_000_000_000tok
     mlm_probability: 0.3 # FlexBERT should use 30% masking for optimal performance
     count_padding_tokens: false
+    device_train_microbatch_size: 36
   # end variables
   # Model
   model:
@@ -137,7 +138,6 @@ parameters:
   # System
   seed: 21
   device_eval_batch_size: 36
-  device_train_microbatch_size: 36
 
   precision: amp_bf16
 
