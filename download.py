@@ -1,4 +1,5 @@
 import argparse
+import time
 from huggingface_hub import snapshot_download
 import glob
 import os
@@ -15,24 +16,34 @@ def download_files(repo_id, pattern, local_dir, workers=8, token=None):
         local_dir (str): Local directory to save the files
         token (str, optional): Hugging Face authentication token for private repos
     """
-    try:
-        # Create the local directory if it doesn't exist
-        os.makedirs(local_dir, exist_ok=True)
+    # Create the local directory if it doesn't exist
+    os.makedirs(local_dir, exist_ok=True)
 
-        # Use the allow_patterns parameter to filter files
-        print(f"Downloading files from {repo_id} with pattern `{pattern}` to {local_dir}")
-        snapshot_download(
-            repo_id=repo_id,
-            allow_patterns=pattern,
-            local_dir=local_dir,
-            repo_type="dataset",
-            max_workers=workers
-        )
+    for attempt in range(10):
+        print(f"Downloading files from {repo_id} with pattern `{pattern}` to {local_dir} [attempt {attempt}]")
+        try:
+            snapshot_download(
+                repo_id=repo_id,
+                allow_patterns=pattern,
+                local_dir=local_dir,
+                repo_type="dataset",
+                max_workers=workers
+            )
+        except KeyboardInterrupt as e:
+            raise e
+        except Exception as e:
+            print(f"Attempt {attempt} failed: {e}")
+            if attempt < 5:
+                time.sleep(10)
+            else:
+                # two stage backoff 
+                time.sleep(120)
+        else:
+            # we're good
+            break
+    else:
+        raise Exception("Never managed to download files")
 
-        print(f"Successfully downloaded files matching '{pattern}' to {local_dir}")
-
-    except Exception as e:
-        print(f"Error downloading files: {str(e)}")
 
 def main():
     parser = argparse.ArgumentParser(description='Download files from Hugging Face Hub')
@@ -50,24 +61,20 @@ def main():
     def timestamp():
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    if args.dist:
-        import composer.utils.dist as dist
-        import torch
-        device = dist.get_device()
-        dist.initialize_dist(device, 300.0)
-        dist.barrier()
-        print(f"{timestamp()} Local rank {dist.get_local_rank()} has passed the initial barrier.")
-        if dist.get_local_rank() == 0:
-            download_files(args.repo, args.pattern, args.output, args.workers, args.token)
-        else:
-            print(f"{timestamp()} Local rank {dist.get_local_rank()} skipping download")
-        # makes exit cleaner?
-        print(f"{timestamp()} Local rank {dist.get_local_rank()} is waiting")
-        dist.barrier()
-        print(f"{timestamp()} Local rank {dist.get_local_rank()} is done waiting")
-        torch.distributed.destroy_process_group()
-    else:
+    import composer.utils.dist as dist
+    import torch
+    dist.initialize_dist('gpu', 300.0)
+    dist.barrier()
+    print(f"{timestamp()} Local rank {dist.get_local_rank()} has passed the initial barrier.")
+    if dist.get_local_rank() == 0:
         download_files(args.repo, args.pattern, args.output, args.workers, args.token)
+    else:
+        print(f"{timestamp()} Local rank {dist.get_local_rank()} skipping download")
+    # makes exit cleaner?
+    print(f"{timestamp()} Local rank {dist.get_local_rank()} is waiting")
+    dist.barrier()
+    print(f"{timestamp()} Local rank {dist.get_local_rank()} is done waiting")
+    torch.distributed.destroy_process_group()
 
 if __name__ == "__main__":
     main()
