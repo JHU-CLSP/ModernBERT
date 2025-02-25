@@ -3,6 +3,8 @@ from huggingface_hub import snapshot_download
 import glob
 import os
 
+from datetime import datetime
+
 def download_files(repo_id, pattern, local_dir, workers=8, token=None):
     """
     Download files from a Hugging Face repository that match a specific pattern.
@@ -43,15 +45,26 @@ def main():
 
     args = parser.parse_args()
 
+    from datetime import datetime
+
+    def timestamp():
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     if args.dist:
         import composer.utils.dist as dist
         import torch
         device = dist.get_device()
-        dist.initialize_dist(device, 300)
-        with dist.run_local_rank_zero_first():
-            download_files(args.repo, args.pattern, args.output, args.workers, args.token)
-        # makes exit cleaner?
+        dist.initialize_dist(device, 300.0)
         dist.barrier()
+        print(f"{timestamp()} Local rank {dist.get_local_rank()} has passed the initial barrier.")
+        if dist.get_local_rank() == 0:
+            download_files(args.repo, args.pattern, args.output, args.workers, args.token)
+        else:
+            print(f"{timestamp()} Local rank {dist.get_local_rank()} skipping download")
+        # makes exit cleaner?
+        print(f"{timestamp()} Local rank {dist.get_local_rank()} is waiting")
+        dist.barrier()
+        print(f"{timestamp()} Local rank {dist.get_local_rank()} is done waiting")
         torch.distributed.destroy_process_group()
     else:
         download_files(args.repo, args.pattern, args.output, args.workers, args.token)
