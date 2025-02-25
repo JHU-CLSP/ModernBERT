@@ -36,7 +36,7 @@ def download_files(repo_id, pattern, local_dir, workers=8, token=None):
             if attempt < 5:
                 time.sleep(10)
             else:
-                # two stage backoff 
+                # two stage backoff
                 time.sleep(120)
         else:
             # we're good
@@ -63,7 +63,7 @@ def main():
 
     import composer.utils.dist as dist
     import torch
-    dist.initialize_dist('gpu', 300.0)
+    dist.initialize_dist('gpu', 60 * 60)
     dist.barrier()
     print(f"{timestamp()} Local rank {dist.get_local_rank()} has passed the initial barrier.")
     if dist.get_local_rank() == 0:
