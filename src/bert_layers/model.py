@@ -96,6 +96,11 @@ from src.bert_layers.initialization import (
     tile_embedding,
     tile_linear,
     tile_norm,
+    SubselectMode,
+    SubselectLinear,
+    subselect_embedding,
+    subselect_linear,
+    subselect_norm,
 )
 from src.bert_layers.layers import (
     BertAlibiEncoder,
@@ -1682,3 +1687,208 @@ def init_mlm_model_from_pretrained(
         )
     else:
         tile_linear(pretrained_model.decoder, new_model.decoder, linear_type=TileLinear.default, mode=mode)
+
+
+
+
+### Smaller models
+
+
+def init_model_from_larger_pretrained(
+    pretrained_model: FlexBertModel,
+    new_model: FlexBertModel,
+    mode: Union[str, SubselectMode] = SubselectMode.subselect_middle,
+):
+    """
+    Initialize the new smaller model from the larger pretrained model.
+
+    This method uses subselection to extract portions of the weights from the larger model.
+    The pretrained model must have the same or more layers and the same or larger dimensions than the new model.
+
+    Args:
+        pretrained_model (FlexBertModel): The larger, pre-trained model
+        new_model (FlexBertModel): The smaller model to be initialized
+        mode (Union[str, SubselectMode]): The subselection mode to use
+
+    This function assumes that the pretrained_model has more layers and a larger hidden size
+    than the new_model, but the same vocabulary size.
+    """
+    # Verify that pretrained model is larger than new model
+    assert pretrained_model.config.hidden_size >= new_model.config.hidden_size, \
+        f"Pretrained model hidden size ({pretrained_model.config.hidden_size}) must be >= new model ({new_model.config.hidden_size})"
+
+    # Subselect embeddings
+    assert isinstance(
+        new_model.embeddings, type(pretrained_model.embeddings)
+    ), f"Pretrained and new_model layers must be the same type, got {type(new_model.embeddings)} and {type(pretrained_model.embeddings)}"
+    assert isinstance(
+        new_model.embeddings,
+        (FlexBertAbsoluteEmbeddings, FlexBertSansPositionEmbeddings, FlexBertCompiledSansPositionEmbeddings),
+    ), f"Unsupported embedding layer type: {type(new_model.embeddings)}"
+
+    subselect_embedding(pretrained_model.embeddings.tok_embeddings, new_model.embeddings.tok_embeddings, mode=mode)
+    if isinstance(pretrained_model.embeddings, FlexBertAbsoluteEmbeddings):
+        subselect_embedding(pretrained_model.embeddings.pos_embeddings, new_model.embeddings.pos_embeddings, mode=mode)
+
+    if hasattr(pretrained_model.embeddings, "norm"):
+        subselect_norm(pretrained_model.embeddings.norm, new_model.embeddings.norm, mode=mode)
+
+    # Subselect encoder layers
+    assert isinstance(
+        pretrained_model.encoder, (FlexBertUnpadEncoder, FlexBertPaddedEncoder)
+    ), f"Unsupported encoder layer type: {type(pretrained_model.encoder)}"
+    assert isinstance(
+        new_model.encoder, type(pretrained_model.encoder)
+    ), f"Pretrained and new_model encoder layers must be the same type, got {type(new_model.encoder)} and {type(pretrained_model.encoder)}"
+
+    # Calculate the layer mapping
+    pretrained_layers = len(pretrained_model.encoder.layers)
+    new_layers = len(new_model.encoder.layers)
+    
+    # Ensure the pretrained model has at least as many layers as the new model
+    assert pretrained_layers >= new_layers, \
+        f"Pretrained model must have at least as many layers ({pretrained_layers}) as the new model ({new_layers})"
+    
+    # If there are more pretrained layers, select a subset of them
+    # This selection logic could be adjusted based on specific requirements
+    if pretrained_layers > new_layers:
+        # Select evenly spaced layers from the pretrained model
+        stride = pretrained_layers / new_layers
+        layer_indices = [int(i * stride) for i in range(new_layers)]
+    else:
+        # Use all layers if they match
+        layer_indices = list(range(new_layers))
+    
+    # Initialize layers
+    for new_model_idx, pretrained_idx in enumerate(layer_indices):
+        new_model_layer = new_model.encoder.layers[new_model_idx]
+        pretrained_layer = pretrained_model.encoder.layers[pretrained_idx]
+
+        # Verify layer types match
+        assert isinstance(
+            new_model_layer, type(pretrained_layer)
+        ), f"Pretrained and new_model prenorm/postnorm layers must be the same type, got {type(new_model_layer)} and {type(pretrained_layer)}"
+        assert isinstance(
+            new_model_layer,
+            (
+                FlexBertUnpadPreNormLayer,
+                FlexBertCompileUnpadPreNormLayer,
+                FlexBertUnpadParallelPreNormLayer,
+                FlexBertUnpadPostNormLayer,
+                FlexBertPaddedPreNormLayer,
+                FlexBertPaddedParallelPreNormLayer,
+                FlexBertPaddedPostNormLayer,
+            ),
+        ), f"Unsupported prenorm/postnorm layer type: {type(new_model_layer)}"
+
+        # First subselect the normalization layers
+        if hasattr(pretrained_layer, "attn_norm"):
+            subselect_norm(pretrained_layer.attn_norm, new_model_layer.attn_norm, mode=mode)
+        if hasattr(pretrained_layer, "norm"):
+            subselect_norm(pretrained_layer.norm, new_model_layer.norm, mode=mode)
+        if hasattr(pretrained_layer, "mlp_norm"):
+            subselect_norm(pretrained_layer.mlp_norm, new_model_layer.mlp_norm, mode=mode)
+
+        # Then subselect the attention & mlp layers
+        assert isinstance(
+            new_model_layer.attn, type(pretrained_layer.attn)
+        ), f"Pretrained and new_model attention layers must be the same type, got {type(new_model_layer.attn)} and {type(pretrained_layer.attn)}"
+
+        # Handle parallel attention layers
+        if isinstance(pretrained_layer, (FlexBertUnpadParallelPreNormLayer, FlexBertPaddedParallelPreNormLayer)):
+            assert isinstance(
+                pretrained_layer.attn,
+                (
+                    FlexBertUnpadParallelAttention,
+                    FlexBertPaddedParallelAttention,
+                    FlexBertUnpadRopeParallelAttention,
+                    FlexBertPaddedRopeParallelAttention,
+                ),
+            ), f"Parallel prenorm layer must have parallel attention layer: {type(pretrained_layer.attn)}"
+            if not isinstance(pretrained_layer.mlp, (FlexBertParallelGLU)):
+                raise ValueError(f"Parallel prenorm layer must have parallel MLP layer: {type(pretrained_layer.mlp)}")
+            subselect_linear(
+                pretrained_layer.Wqkvff,
+                new_model_layer.Wqkvff,
+                linear_type=SubselectLinear.wqkvff,
+                mode=mode,
+                pretrained_attn_size=pretrained_layer.attn_size,
+                pretrained_mlp_size=pretrained_layer.mlp_size,
+                new_attn_size=new_model_layer.attn_size,
+                new_mlp_size=new_model_layer.mlp_size,
+                wqkvff_is_glu=True,
+            )
+
+        # Handle fused attention layers
+        elif isinstance(
+            pretrained_layer.attn,
+            (
+                FlexBertUnpadAttention,
+                FlexBertPaddedAttention,
+                FlexBertUnpadRopeAttention,
+                FlexBertPaddedRopeAttention,
+            ),
+        ):
+            subselect_linear(pretrained_layer.attn.Wqkv, new_model_layer.attn.Wqkv, linear_type=SubselectLinear.wqkv, mode=mode)
+        else:
+            raise ValueError(f"Unsupported attention layer type: {type(pretrained_layer.attn)}")
+
+        # Subselect the attention output layer
+        subselect_linear(pretrained_layer.attn.Wo, new_model_layer.attn.Wo, linear_type=SubselectLinear.default, mode=mode)
+
+        # Subselect the MLP layer if not using parallel attention
+        if not isinstance(pretrained_layer.mlp, (FlexBertMLP, FlexBertGLU, FlexBertParallelGLU)):
+            raise ValueError(f"Unsupported MLP layer type: {type(pretrained_layer.mlp)}")
+        assert isinstance(
+            new_model_layer.mlp, type(pretrained_layer.mlp)
+        ), f"Pretrained and new_model mlp layers must be the same type, got {type(new_model_layer.mlp)} and {type(pretrained_layer.mlp)}"
+
+        # Already subselected the parallel GLU layer if it exists, so only need to handle MLP & GLU Wi
+        if isinstance(pretrained_layer.mlp, FlexBertGLU):
+            subselect_linear(pretrained_layer.mlp.Wi, new_model_layer.mlp.Wi, linear_type=SubselectLinear.glu, mode=mode)
+        elif isinstance(pretrained_layer.mlp, FlexBertMLP):
+            subselect_linear(pretrained_layer.mlp.Wi, new_model_layer.mlp.Wi, linear_type=SubselectLinear.default, mode=mode)
+        # Subselect the output for both ParallelGLU and MLP/GLU
+        subselect_linear(pretrained_layer.mlp.Wo, new_model_layer.mlp.Wo, linear_type=SubselectLinear.default, mode=mode)
+
+
+def init_mlm_model_from_larger_pretrained(
+    config: FlexBertConfig,
+    pretrained_model: FlexBertForMaskedLM,
+    new_model: FlexBertForMaskedLM,
+    mode: Union[str, SubselectMode] = SubselectMode.subselect_middle,
+):
+    """
+    Initialize the new smaller model from the larger pretrained model.
+
+    This method uses subselection to extract portions of the weights from the larger model.
+    The pretrained model must have the same or more layers and the same or larger dimensions than the new model.
+
+    Args:
+        config (FlexBertConfig): The configuration of the new_model
+        pretrained_model (FlexBertForMaskedLM): The larger, pre-trained model
+        new_model (FlexBertForMaskedLM): The smaller model to be initialized from the pretrained model
+        mode (Union[str, SubselectMode]): The subselection mode to use
+
+    This function assumes that the pretrained_model has more layers and a larger hidden size
+    than the new_model, but the same vocabulary size.
+    """
+    # Initialize the base model first
+    init_model_from_larger_pretrained(pretrained_model.bert, new_model.bert, mode=mode)
+
+    # Verify the head is a prediction head
+    if not hasattr(pretrained_model, 'head') or not hasattr(new_model, 'head'):
+        raise ValueError(f"Models must have prediction heads")
+
+    # Subselect the prediction head
+    subselect_linear(pretrained_model.head.dense, new_model.head.dense, linear_type=SubselectLinear.default, mode=mode)
+    subselect_norm(pretrained_model.head.norm, new_model.head.norm, mode=mode)
+
+    # Handle weight tying
+    if config.tie_word_embeddings:
+        new_model.decoder.weight = new_model.bert.embeddings.tok_embeddings.weight
+        subselect_linear(
+            pretrained_model.decoder, new_model.decoder, linear_type=SubselectLinear.default, mode=mode, bias_only=True
+        )
+    else:
+        subselect_linear(pretrained_model.decoder, new_model.decoder, linear_type=SubselectLinear.default, mode=mode)

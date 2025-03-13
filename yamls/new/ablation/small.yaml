@@ -29,9 +29,9 @@ model:
     vocab_size: 256000
     init_method: full_megatron
     num_hidden_layers: 22
-    hidden_size: 768
+    hidden_size: 384
     intermediate_size: 1152
-    num_attention_heads: 6 # to have head size of 64
+    num_attention_heads: 8 # to have head size of 64
     attention_layer: rope
     attention_probs_dropout_prob: 0.0
     attn_out_bias: false
@@ -71,6 +71,13 @@ model:
     unpad_embeddings: true
     compile_model: true
     masked_prediction: true
+
+init_from_checkpoint:
+  checkpoint_cfg: /home/oweller2/my_scratch/official_modernbert/ModernBERT/yamls/new/ablation/base.yaml # path to any base yaml config (gets arch details)
+  checkpoint_load_path: /home/oweller2/my_scratch/nlu-evals/ # path before the last dir holding checkpoints
+  checkpoint_run_name: ablation-base-v2 # path of the folder that has the checkpoints
+  mode: subselect_strided # Options: subselect_middle, subselect_first, subselect_last, subselect_strided
+  use_subselection: true    
 
 # Dataloaders
 train_loader:

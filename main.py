@@ -14,7 +14,7 @@ import torch
 from torch import nn
 
 from src.bert_layers.configuration_bert import FlexBertConfig
-from src.bert_layers.model import init_mlm_model_from_pretrained
+from src.bert_layers.model import init_mlm_model_from_pretrained, init_mlm_model_from_larger_pretrained
 
 # Add folder root to path to allow us to use relative imports regardless of what directory the script is run from
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
@@ -363,12 +363,21 @@ def init_from_checkpoint(cfg: DictConfig, new_model: nn.Module):
         model_config = OmegaConf.to_container(pretrained_cfg.model.model_config, resolve=True)
     pretrained_config = FlexBertConfig.from_pretrained(pretrained_cfg.model.pretrained_model_name, **model_config)
 
-    init_mlm_model_from_pretrained(
-        config=pretrained_config,
-        pretrained_model=pretrained_model.model,
-        new_model=new_model.model,
-        mode=cfg.get("mode", "tile_weights_from_middle"),
-    )
+    if "subselect" in cfg.get("mode", "tile_weights_from_middle"):
+        init_mlm_model_from_larger_pretrained(
+            config=pretrained_config,
+            pretrained_model=pretrained_model.model,
+            new_model=new_model.model,
+            mode=cfg.get("mode", "tile_weights_from_middle"),
+        )
+    else:
+        init_mlm_model_from_pretrained(
+            config=pretrained_config,
+            pretrained_model=pretrained_model.model,
+            new_model=new_model.model,
+            mode=cfg.get("mode", "tile_weights_from_middle"),
+        )
+
     print(f"Initalized model from checkpoint {cfg.checkpoint_run_name} with {n_params=:.4e} parameters")
 
 

@@ -549,3 +549,388 @@ def tile_embedding(
                 new_embedding.padding_idx = pretrained_embedding.padding_idx
             else:
                 assert new_embedding.padding_idx == pretrained_embedding.padding_idx, "padding_idx must remain the same"
+
+
+### Subselecting
+
+
+class SubselectMode(StrEnum):
+    subselect_middle = "subselect_middle"
+    """Select the middle portion of the weights."""
+    
+    subselect_first = "subselect_first"
+    """Select the first/beginning portion of the weights."""
+    
+    subselect_last = "subselect_last"
+    """Select the last/end portion of the weights."""
+    
+    subselect_strided = "subselect_strided"
+    """Select weights in a strided fashion based on the size difference."""
+
+
+def subselect_weight(
+    pretrained_weights: torch.Tensor,
+    new_weights: torch.Tensor,
+    mode: Union[str, SubselectMode] = SubselectMode.subselect_middle,
+) -> torch.Tensor:
+    """
+    Subselect a portion of an input tensor to a smaller desired size. Works for both 2D and 1D tensors.
+
+    Args:
+    pretrained_weights (torch.Tensor): The larger input tensor to be subselected from (1D or 2D).
+    new_weights (torch.Tensor): The tensor with the desired smaller size.
+    mode (Union[str, SubselectMode]): 'subselect_middle', 'subselect_first', 'subselect_last', or 'subselect_strided'
+
+    Returns:
+    torch.Tensor: The resulting tensor of the desired smaller size.
+    """
+    assert pretrained_weights.dim() in (1, 2), "Input tensor must be 1-dimensional or 2-dimensional"
+    if isinstance(mode, str):
+        mode = SubselectMode(mode)
+
+    # Ensure the pretrained weights are larger than the new weights
+    if pretrained_weights.dim() == 1:
+        assert pretrained_weights.shape[0] >= new_weights.shape[0], "Pretrained size must be greater than or equal to desired size"
+        return _subselect_1d(pretrained_weights, new_weights, mode)
+    else:
+        assert pretrained_weights.shape[0] >= new_weights.shape[0] and pretrained_weights.shape[1] >= new_weights.shape[1], \
+            "Pretrained dimensions must be greater than or equal to desired dimensions"
+        return _subselect_2d(pretrained_weights, new_weights, mode)
+
+
+def _subselect_1d(pretrained_weights: torch.Tensor, new_weights: torch.Tensor, mode: SubselectMode) -> torch.Tensor:
+    """Subselect from a 1D tensor to a smaller size."""
+    assert pretrained_weights.dim() == 1, "Input tensor must be 1-dimensional"
+    pretrained_size = pretrained_weights.shape[0]
+    new_size = new_weights.shape[0]
+    
+    if mode == SubselectMode.subselect_middle:
+        # Select the middle portion
+        start_idx = (pretrained_size - new_size) // 2
+        new_weights = pretrained_weights[start_idx:start_idx + new_size].clone()
+    
+    elif mode == SubselectMode.subselect_first:
+        # Select the first portion
+        new_weights = pretrained_weights[:new_size].clone()
+    
+    elif mode == SubselectMode.subselect_last:
+        # Select the last portion
+        new_weights = pretrained_weights[-new_size:].clone()
+    
+    elif mode == SubselectMode.subselect_strided:
+        # Select with stride
+        # Calculate the stride needed to evenly sample the pretrained weights
+        stride = pretrained_size / new_size
+        indices = torch.linspace(0, pretrained_size - 1, new_size).long()
+        new_weights = pretrained_weights[indices].clone()
+    
+    return new_weights
+
+
+def _subselect_2d(pretrained_weights: torch.Tensor, new_weights: torch.Tensor, mode: SubselectMode) -> torch.Tensor:
+    """Subselect from a 2D tensor to a smaller size."""
+    assert pretrained_weights.dim() == 2, "Input tensor must be 2-dimensional"
+    pretrained_height, pretrained_width = pretrained_weights.shape
+    new_height, new_width = new_weights.shape
+    
+    if mode == SubselectMode.subselect_middle:
+        # Select the middle portion
+        height_start = (pretrained_height - new_height) // 2
+        width_start = (pretrained_width - new_width) // 2
+        new_weights = pretrained_weights[
+            height_start:height_start + new_height, 
+            width_start:width_start + new_width
+        ].clone()
+    
+    elif mode == SubselectMode.subselect_first:
+        # Select the first/top-left portion
+        new_weights = pretrained_weights[:new_height, :new_width].clone()
+    
+    elif mode == SubselectMode.subselect_last:
+        # Select the last/bottom-right portion
+        new_weights = pretrained_weights[-new_height:, -new_width:].clone()
+    
+    elif mode == SubselectMode.subselect_strided:
+        # Select with stride for both dimensions
+        # Calculate the strides needed to evenly sample the pretrained weights
+        height_stride = pretrained_height / new_height
+        width_stride = pretrained_width / new_width
+        
+        # Create indices for rows and columns
+        row_indices = [int(i * height_stride) for i in range(new_height)]
+        col_indices = [int(j * width_stride) for j in range(new_width)]
+        
+        # Use advanced indexing to extract the strided values
+        for i, row_idx in enumerate(row_indices):
+            for j, col_idx in enumerate(col_indices):
+                new_weights[i, j] = pretrained_weights[row_idx, col_idx].clone()
+    
+    return new_weights
+
+
+def subselect_fused_qkv(
+    pretrained_qkv_weight: torch.Tensor,
+    new_qkv_weight: torch.Tensor,
+    mode: Union[str, SubselectMode] = SubselectMode.subselect_middle,
+):
+    """
+    Subselect portions of a fused pretrained QKV layer to a new, smaller QKV dimension.
+
+    Args:
+        pretrained_qkv_weight (torch.Tensor): The original fused QKV layer (larger)
+        new_qkv_weight (torch.Tensor): The new fused QKV layer with smaller dimensions
+        mode (Union[str, SubselectMode]): The subselection mode to use
+    Returns:
+        torch.Tensor: The new fused QKV layer with subselected weights
+    """
+    # Split QKV, assume new_q, new_k, new_v are the same shape
+    pretrained_q, pretrained_k, pretrained_v = pretrained_qkv_weight.chunk(3, dim=0)
+    new_q, new_k, new_v = new_qkv_weight.chunk(3, dim=0)
+
+    # Subselect Q, K, V separately
+    new_q = subselect_weight(pretrained_q, new_q, mode=mode)
+    new_k = subselect_weight(pretrained_k, new_k, mode=mode)
+    new_v = subselect_weight(pretrained_v, new_v, mode=mode)
+
+    # Concatenate subselected Q, K, V
+    return torch.cat([new_q, new_k, new_v], dim=0)
+
+
+def subselect_fused_glu(
+    pretrained_glu_weight: torch.Tensor,
+    new_glu_weight: torch.Tensor,
+    mode: Union[str, SubselectMode] = SubselectMode.subselect_middle,
+):
+    """
+    Subselect portions of a fused pretrained GLU layer to a new, smaller GLU dimension.
+
+    Args:
+        pretrained_glu_weight (torch.Tensor): The original fused GLU layer (larger)
+        new_glu_weight (torch.Tensor): The new fused GLU layer with smaller dimensions
+        mode (Union[str, SubselectMode]): The subselection mode to use
+    Returns:
+        torch.Tensor: The new fused GLU layer with subselected weights
+    """
+    # Split GLU, assume new_glu_wi, new_glu_wg are the same shape
+    pretrained_glu_wi, pretrained_glu_wg = pretrained_glu_weight.chunk(2, dim=0)
+    new_glu_wi, new_glu_wg = new_glu_weight.chunk(2, dim=0)
+
+    # Subselect GLU separately
+    new_glu_wi = subselect_weight(pretrained_glu_wi, new_glu_wi, mode=mode)
+    new_glu_wg = subselect_weight(pretrained_glu_wg, new_glu_wg, mode=mode)
+
+    # Concatenate subselected GLU
+    return torch.cat([new_glu_wi, new_glu_wg], dim=0)
+
+
+def subselect_fused_qkvff(
+    pretrained_qkvff_weight: torch.Tensor,
+    new_qkvff_weight: torch.Tensor,
+    pretrained_attn_size: int,
+    pretrained_mlp_size: int,
+    new_attn_size: int,
+    new_mlp_size: int,
+    is_glu: bool = False,
+    mode: Union[str, SubselectMode] = SubselectMode.subselect_middle,
+):
+    """
+    Subselect portions of a fused pretrained QKVFF layer to a new, smaller QKVFF dimension.
+
+    Args:
+        pretrained_qkvff_weight (torch.Tensor): The original fused QKVFF layer (larger)
+        new_qkvff_weight (torch.Tensor): The new fused QKVFF layer with smaller dimensions
+        pretrained_attn_size (int): The attention size of the pretrained fused QKVFF layer
+        pretrained_mlp_size (int): The mlp size of the pretrained fused QKVFF layer
+        new_attn_size (int): The attention size of the new fused QKVFF layer
+        new_mlp_size (int): The mlp size of the new fused QKVFF layer
+        is_glu (bool): Whether the QKVFF layer is a GLU layer
+        mode (Union[str, SubselectMode]): The subselection mode to use
+    Returns:
+        torch.Tensor: The new fused QKVFF layer with subselected weights
+    """
+    # Split QKVFF
+    pretrained_qkv, pretrained_ff = pretrained_qkvff_weight.split([pretrained_attn_size, pretrained_mlp_size], dim=0)
+    new_qkv, new_ff = new_qkvff_weight.split([new_attn_size, new_mlp_size], dim=0)
+
+    # Subselect QKVFF separately
+    new_qkv = subselect_fused_qkv(pretrained_qkv, new_qkv, mode=mode)
+    if is_glu:
+        new_ff = subselect_fused_glu(pretrained_ff, new_ff, mode=mode)
+    else:
+        new_ff = subselect_weight(pretrained_ff, new_ff, mode=mode)
+
+    # Concatenate subselected QKVFF
+    return torch.cat([new_qkv, new_ff], dim=0)
+
+
+class SubselectLinear(StrEnum):
+    wqkv = "wqkv"
+    glu = "glu"
+    wqkvff = "wqkvff"
+    default = "default"
+
+
+def subselect_linear(
+    pretrained_linear: nn.Linear,
+    new_linear: nn.Linear,
+    linear_type: Union[str, SubselectLinear] = SubselectLinear.default,
+    mode: Union[str, SubselectMode] = SubselectMode.subselect_middle,
+    pretrained_attn_size: Optional[int] = None,
+    pretrained_mlp_size: Optional[int] = None,
+    new_attn_size: Optional[int] = None,
+    new_mlp_size: Optional[int] = None,
+    wqkvff_is_glu: Optional[bool] = None,
+    bias_only: Optional[bool] = False,
+):
+    """
+    Subselect portions of a pretrained linear layer to a new, smaller linear dimension.
+
+    Args:
+        pretrained_linear (nn.Linear): The original linear layer (larger)
+        new_linear (nn.Linear): The new linear layer with smaller dimensions
+        linear_type (Union[str, SubselectLinear]): The type of linear layer to subselect
+        mode (Union[str, SubselectMode]): The subselection mode to use
+        pretrained_attn_size (int): The attention size of the pretrained linear layer. Only used if linear_type is wqkvff.
+        pretrained_mlp_size (int): The mlp size of the pretrained linear layer. Only used if linear_type is wqkvff.
+        new_attn_size (int): The attention size of the new linear layer. Only used if linear_type is wqkvff.
+        new_mlp_size (int): The mlp size of the new linear layer. Only used if linear_type is wqkvff.
+        wqkvff_is_glu (bool): Whether the wqkvff layer is a GLU layer. Only used if linear_type is wqkvff.
+        bias_only (bool): Whether to only subselect the bias. Only used if weight tied decoder.
+    """
+    if isinstance(linear_type, str):
+        linear_type = SubselectLinear(linear_type)
+    if isinstance(mode, str):
+        mode = SubselectMode(mode)
+
+    with torch.no_grad():
+        if linear_type == SubselectLinear.wqkv:
+            if not bias_only:
+                new_linear.weight = nn.Parameter(
+                    subselect_fused_qkv(pretrained_linear.weight, new_linear.weight, mode=mode),
+                    requires_grad=new_linear.weight.requires_grad,
+                )
+            if pretrained_linear.bias is not None:
+                new_linear.bias = nn.Parameter(
+                    subselect_fused_qkv(pretrained_linear.bias, new_linear.bias, mode=mode),
+                    requires_grad=new_linear.bias.requires_grad,
+                )
+        elif linear_type == SubselectLinear.glu:
+            if not bias_only:
+                new_linear.weight = nn.Parameter(
+                    subselect_fused_glu(pretrained_linear.weight, new_linear.weight, mode=mode),
+                    requires_grad=new_linear.weight.requires_grad,
+                )
+            if pretrained_linear.bias is not None:
+                new_linear.bias = nn.Parameter(
+                    subselect_fused_glu(pretrained_linear.bias, new_linear.bias, mode=mode),
+                    requires_grad=new_linear.bias.requires_grad,
+                )
+        elif linear_type == SubselectLinear.wqkvff:
+            if not bias_only:
+                new_linear.weight = nn.Parameter(
+                    subselect_fused_qkvff(
+                        pretrained_linear.weight,
+                        new_linear.weight,
+                        pretrained_attn_size,
+                        pretrained_mlp_size,
+                        new_attn_size,
+                        new_mlp_size,
+                        wqkvff_is_glu,
+                        mode=mode,
+                    ),
+                    requires_grad=new_linear.weight.requires_grad,
+                )
+            if pretrained_linear.bias is not None:
+                new_linear.bias = nn.Parameter(
+                    subselect_fused_qkvff(
+                        pretrained_linear.bias,
+                        new_linear.bias,
+                        pretrained_attn_size,
+                        pretrained_mlp_size,
+                        new_attn_size,
+                        new_mlp_size,
+                        wqkvff_is_glu,
+                        mode=mode,
+                    ),
+                    requires_grad=new_linear.bias.requires_grad,
+                )
+        else:
+            if not bias_only:
+                new_linear.weight = nn.Parameter(
+                    subselect_weight(pretrained_linear.weight, new_linear.weight, mode=mode),
+                    requires_grad=new_linear.weight.requires_grad,
+                )
+            if pretrained_linear.bias is not None:
+                new_linear.bias = nn.Parameter(
+                    subselect_weight(pretrained_linear.bias, new_linear.bias, mode=mode),
+                    requires_grad=new_linear.bias.requires_grad,
+                )
+
+
+def subselect_norm(
+    pretrained_norm: Union[nn.LayerNorm, RMSNorm, nn.Identity],
+    new_norm: Union[nn.LayerNorm, RMSNorm, nn.Identity],
+    mode: Union[str, SubselectMode] = SubselectMode.subselect_middle,
+):
+    """
+    Subselect portions of a pretrained norm layer to a new, smaller layer norm dimension.
+
+    Args:
+        pretrained_norm (Union[nn.LayerNorm, RMSNorm, nn.Identity]): The original norm layer (larger)
+        new_norm (Union[nn.LayerNorm, RMSNorm, nn.Identity]): The new norm layer with smaller dimensions
+        mode (Union[str, SubselectMode]): The subselection mode to use
+    """
+    if isinstance(pretrained_norm, nn.Identity):
+        return
+    if isinstance(mode, str):
+        mode = SubselectMode(mode)
+
+    with torch.no_grad():
+        new_norm.weight.data = nn.Parameter(
+            subselect_weight(pretrained_norm.weight, new_norm.weight, mode=mode),
+            requires_grad=new_norm.weight.requires_grad,
+        )
+        if hasattr(pretrained_norm, "bias") and pretrained_norm.bias is not None:
+            new_norm.bias.data = nn.Parameter(
+                subselect_weight(pretrained_norm.bias, new_norm.bias, mode=mode),
+                requires_grad=new_norm.bias.requires_grad,
+            )
+
+
+def subselect_embedding(
+    pretrained_embedding: nn.Embedding,
+    new_embedding: nn.Embedding,
+    mode: Union[str, SubselectMode] = SubselectMode.subselect_middle,
+) -> nn.Embedding:
+    """
+    Subselect portions of an embedding layer to a new, smaller embedding dimension.
+
+    Args:
+    pretrained_embedding (nn.Embedding): The original embedding layer (larger)
+    new_embedding (nn.Embedding): The new embedding layer with smaller embedding_dim
+    mode (Union[str, SubselectMode]): The subselection mode to use
+
+    Returns:
+    nn.Embedding: The new embedding layer with subselected weights
+    """
+    with torch.no_grad():
+        # Ensure vocabulary size remains the same
+        if pretrained_embedding.num_embeddings != new_embedding.num_embeddings:
+            raise ValueError("Vocabulary size (num_embeddings) must remain constant")
+
+        # Ensure new embedding dimension is smaller
+        if new_embedding.embedding_dim >= pretrained_embedding.embedding_dim:
+            raise ValueError("New embedding_dim must be smaller than the old embedding_dim")
+
+        # Subselect the weights
+        new_embedding.weight.data = nn.Parameter(
+            subselect_weight(pretrained_embedding.weight, new_embedding.weight, mode=mode),
+            requires_grad=new_embedding.weight.requires_grad,
+        )
+
+        # Handle padding_idx if it exists
+        if pretrained_embedding.padding_idx is not None:
+            if new_embedding.padding_idx is None:
+                new_embedding.padding_idx = pretrained_embedding.padding_idx
+            else:
+                assert new_embedding.padding_idx == pretrained_embedding.padding_idx, "padding_idx must remain the same"
