@@ -371,6 +371,19 @@ def init_from_checkpoint(cfg: DictConfig, new_model: nn.Module):
     )
     print(f"Initalized model from checkpoint {cfg.checkpoint_run_name} with {n_params=:.4e} parameters")
 
+def has_checkpoints(save_folder):
+    import composer
+    object_store = composer.utils.maybe_create_object_store_from_uri(cfg.get("save_folder", None))
+    if object_store:
+        objects = composer.utils.file_helpers.list_remote_objects(cfg['save_folder'])
+    else:
+        try:
+            objects = os.listdir(cfg['save_folder'])
+        except:
+            objects = []
+
+    has_checkpoints = len([o for o in objects if o.endswith(".pt") or "symlink" in o]) > 0
+    return has_checkpoints
 
 def main(cfg: DictConfig, return_trainer: bool = False, do_train: bool = True) -> Optional[Trainer]:
     print("Training using config: ")
@@ -476,6 +489,15 @@ def main(cfg: DictConfig, return_trainer: bool = False, do_train: bool = True) -
 
     print("Logging config...")
     log_config(cfg)
+
+    if cfg.get("reset_time_once", False):
+        save_folder = cfg.get("save_folder", "")
+        if has_checkpoints(save_folder):
+            cfg["reset_time"] = False
+            print("reset_time_once was set but some checkpoints were found, will not reset time")
+        else:
+            print("reset_time_once was set and no checkpoints were found, reseting time!")
+            cfg["reset_time"] = True
 
     if do_train:
         print("Starting training...")
